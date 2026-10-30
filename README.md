@@ -35,33 +35,72 @@ A extração usa um analisador de linhas com estado: quando uma linha casa com o
 - `PyMuPDF` — leitura de PDF a partir da memória
 - `requests` + `urllib3` — sessão persistente com retry
 - `concurrent.futures` — paralelismo por threads
-- `pandas` — consolidação e exportação
-- `openpyxl` — formatação do Excel
+- `pandas` + `openpyxl` — consolidação e formatação do Excel
+- `pytest` — testes da extração e da gravação
+
+## Estrutura
+
+A extração não faz rede nem disco: recebe texto e devolve registros. É o que
+permite testá-la com trechos salvos, sem depender do DOU estar no ar.
+
+```
+robo_dou.py          ponto de entrada e resumo da execução
+dou/
+├── config.py        argumentos de linha de comando e variáveis de ambiente
+├── coleta.py        download e extração do texto do PDF
+├── extracao.py      leitura do texto (função pura, testável)
+└── saida.py         gravação do Excel
+tests/
+├── test_extracao.py
+└── test_saida.py
+```
 
 ## Como rodar
 
 ```bash
 git clone https://github.com/Jvsrp77/robo-scanner-dou.git
 cd robo-scanner-dou
+python -m venv .venv && .venv/Scripts/activate      # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
-python robo_dou.py
+
+python robo_dou.py                                   # edição de hoje
+python robo_dou.py --data 08/12/2025                 # edição passada
+python robo_dou.py --threads 4 --pagina-final 120    # varredura menor
 ```
 
-O relatório é salvo na pasta atual como `Relatorio_Geral_DD-MM-AAAA.xlsx`. Se já existir um arquivo com o nome do dia, os novos registros são anexados ao final em vez de sobrescrevê-lo.
+| Argumento | Padrão | O que faz |
+|---|---|---|
+| `--data` | hoje | Edição a varrer, em `DD/MM/AAAA` |
+| `--pagina-inicial` / `--pagina-final` | 1 / 400 | Intervalo de páginas |
+| `--threads` | 6 | Downloads simultâneos |
+| `--pausa` | 0,2 s | Intervalo entre requisições |
+| `--saida` | `.` | Pasta do relatório |
 
-## Configuração
+Também aceita `DOU_PAGINA_FINAL`, `DOU_THREADS`, `DOU_SAIDA` e `DOU_JORNAL_ID`
+por variável de ambiente, para agendamento.
 
-As variáveis ficam no topo do script:
+**O processo termina com código 1 se alguma página falhou.** Pipeline que falha
+em silêncio é pior que pipeline que quebra.
 
-```python
-DATA_ALVO = datetime.datetime.now().strftime("%d/%m/%Y")   # padrão: hoje
-JORNAL_ID = 515        # Seção 1 do DOU
-PAGINA_INICIAL = 1
-PAGINA_FINAL = 400     # limite de varredura
-THREADS = 50           # downloads simultâneos
+```
+ 400 páginas solicitadas
+ 382 com PDF válido
+  18 sem PDF (fim da seção)
+   0 com erro de rede ou leitura
+ 127 registros extraídos (3 continuavam na página seguinte)
 ```
 
-Para varrer uma data passada, fixe `DATA_ALVO` no formato `"DD/MM/AAAA"`.
+## Testes
+
+```bash
+pytest
+```
+
+15 testes, nenhum acessa a rede. Cobrem o reconhecimento de empresa e CNPJ, o
+acúmulo de atividades, a classificação de situação (incluindo o caso em que
+`INDEFERIDO` contém `DEFERIDO`), a costura de registro partido entre páginas e
+a gravação do Excel — entre eles um que simula falha de escrita e confere que o
+relatório anterior **não** foi destruído.
 
 ## O relatório
 
@@ -77,14 +116,22 @@ Para varrer uma data passada, fixe `DATA_ALVO` no formato `"DD/MM/AAAA"`.
 
 ## Limitações conhecidas
 
-Registradas por transparência — são os pontos que eu trataria antes de considerar isto pronto para produção:
+Registradas por transparência:
 
-- **Falhas são silenciosas.** Página que não baixa devolve lista vazia, igual a uma página sem empresas. Não dá para distinguir "não achou nada" de "o download falhou", e os `except` genéricos engolem a causa. O correto seria registrar o erro por página e informar quantas falharam ao fim.
-- **50 threads contra um servidor público é agressivo.** Não há limite de taxa nem intervalo entre requisições. Para uso recorrente, vale reduzir o paralelismo ou espaçar as chamadas — o retry trata a falha, mas não evita causá-la.
-- **Registro dividido entre duas páginas se perde.** Cada página é analisada isoladamente, então uma empresa cujo bloco começa no fim de uma página e termina na seguinte sai incompleta.
-- **A classificação de situação é por palavra-chave.** `DEFERIDO`, `CONCESSÃO`, `AUTORIZA` e `INDEFERIDO` são procurados na linha crua. Texto com negação ou redação fora do padrão pode ser classificado errado.
-- **Configuração por edição do arquivo.** Sem argumentos de linha de comando, o que atrapalha agendar execuções com datas diferentes.
-- **Sem testes.**
+- **O padrão de reconhecimento não casa com o DOU atual.** A expressão regular
+  espera `RAZÃO SOCIAL / 00.000.000/0000-00` na mesma linha. Varrendo as edições
+  de 08/12/2025, 27/10/2026 e 29/10/2026, encontrei **861, 184 e 335 linhas com
+  CNPJ e nenhuma nesse formato** — o texto atual traz `CNPJ/CPF: 00.000.000/0001-00`
+  numa linha própria, com a razão social na linha anterior. Enquanto isso não for
+  tratado, a extração devolve zero registros nessas edições.
+- **A classificação de situação é por palavra-chave.** `DEFERIDO`, `CONCESSÃO`,
+  `AUTORIZA` e `INDEFERIDO` são procurados na linha crua. Redação fora do padrão
+  pode ser classificada errado.
+- **O destino é um Excel por dia.** Para histórico e consulta, o caminho é banco
+  de dados — é o próximo passo do projeto.
+- **A costura entre páginas não atravessa buraco.** Se a página do meio falhou
+  ou não existe, o registro aberto é fechado como está, porque o trecho perdido
+  não pode ser inventado.
 
 ## Licença
 
