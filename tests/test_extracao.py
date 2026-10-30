@@ -2,6 +2,7 @@
 
 from dou.coleta import PaginaBaixada
 from dou.extracao import (
+    Resolucao,
     STATUS_EM_ANALISE,
     STATUS_INDEFERIDO,
     STATUS_LIBERADA,
@@ -17,10 +18,10 @@ def link(pagina: int) -> str:
     return f"https://exemplo/{pagina}"
 
 
-def extrair_texto(texto, pagina=1, aberto=None, anterior=""):
-    """Descarta a ultima linha devolvida: so os testes de costura precisam dela."""
-    fechados, aberto, _ = extrair_da_pagina(
-        texto, pagina, DATA, link(pagina), aberto, anterior
+def extrair_texto(texto, pagina=1, aberto=None, anterior="", resolucao=None):
+    """Descarta o que so os testes de contexto precisam."""
+    fechados, aberto, _, _ = extrair_da_pagina(
+        texto, pagina, DATA, link(pagina), aberto, anterior, resolucao
     )
     return fechados, aberto
 
@@ -210,3 +211,68 @@ def test_dois_proponentes_seguidos_viram_dois_registros():
     assert len(fechados) == 1
     assert fechados[0].cnpj == "21.098.367/0001-60"
     assert aberto.cnpj == "30.017.987/0001-18"
+
+# ------------------------------------------ autorizacao sanitaria (AFE/AE)
+# O deferimento nao vem registro a registro: vem no Art. 1o da RESOLUCAO-RE,
+# e vale para todo o anexo que a segue.
+
+BLOCO_AFE = chr(10).join([
+    "RESOLUCAO-RE No 4.229, DE 27 DE OUTUBRO DE 2026",
+    "Art. 1o. Deferir as peticoes de Autorizacao de Funcionamento (AFE) e de",
+    "Autorizacao Especial (AE), conforme anexo.",
+    "ANEXO",
+    "DOSFARMAS LTDA / 53.701.552/0001-93",
+    "25351.171723/2024-19 / 5106734",
+    "COMERCIO: ALIMENTOS PERMITIDOS / COSMETICOS",
+    "7110 - AFE - ALTERACAO - FARMACIAS E DROGARIAS / 1140139266",
+])
+
+
+def test_deferimento_vem_da_resolucao_e_nao_do_registro():
+    _, aberto = extrair_texto(BLOCO_AFE)
+
+    assert aberto is not None
+    assert aberto.empresa == "DOSFARMAS LTDA"
+    assert aberto.status == STATUS_LIBERADA
+    assert aberto.resolucao == "4.229"
+    assert aberto.sanitario is True
+
+
+def test_indeferimento_tambem_vem_da_resolucao():
+    texto = BLOCO_AFE.replace("Deferir as peticoes", "Indeferir as peticoes")
+    _, aberto = extrair_texto(texto)
+
+    assert aberto.status == STATUS_INDEFERIDO
+
+
+def test_processo_expediente_e_peticao_sao_capturados():
+    _, aberto = extrair_texto(BLOCO_AFE)
+
+    assert aberto.processo == "25351.171723/2024-19"
+    assert aberto.expediente == "5106734"
+    assert aberto.peticao.startswith("AFE - ALTERACAO")
+    assert aberto.atividades == ["COMERCIO: ALIMENTOS PERMITIDOS / COSMETICOS"]
+
+
+def test_filtro_descarta_o_que_nao_e_autorizacao_sanitaria():
+    rouanet = PaginaBaixada(10, texto=chr(10).join([
+        "VENTO LESTE EDITORA E PUBLICACOES LTDA",
+        "CNPJ/CPF: 21.098.367/0001-60",
+    ]))
+    sanitaria = PaginaBaixada(11, texto=BLOCO_AFE)
+
+    todas = extrair([rouanet, sanitaria], DATA, link)
+    so_afe = extrair([rouanet, sanitaria], DATA, link, somente_sanitarias=True)
+
+    assert len(todas) == 2
+    assert len(so_afe) == 1
+    assert so_afe[0].empresa == "DOSFARMAS LTDA"
+
+
+def test_nova_resolucao_fecha_o_registro_anterior():
+    texto = BLOCO_AFE + chr(10) + "RESOLUCAO-RE No 4.230, DE 27 DE OUTUBRO DE 2026"
+    fechados, aberto = extrair_texto(texto)
+
+    assert len(fechados) == 1
+    assert fechados[0].empresa == "DOSFARMAS LTDA"
+    assert aberto is None

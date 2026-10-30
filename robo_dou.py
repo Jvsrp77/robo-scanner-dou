@@ -32,11 +32,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f" ROBO DOU - edicao de {cfg.data_br}")
     print(f" paginas {cfg.pagina_inicial}-{cfg.pagina_final}"
           f" | {cfg.threads} threads | pausa {cfg.pausa}s")
+    print(" filtro: " + ("nenhum (toda a Secao 1)" if cfg.todas
+                         else "autorizacao sanitaria (AFE/AE)"))
     print("=" * 62)
 
     inicio = time.time()
     paginas = coleta.baixar_todas(cfg, progresso=_progresso)
-    registros = extracao.extrair(paginas, cfg.data_br, cfg.link_publico)
+    registros = extracao.extrair(
+        paginas, cfg.data_br, cfg.link_publico,
+        somente_sanitarias=not cfg.todas,
+    )
 
     com_pdf = sum(1 for p in paginas if p.ok)
     sem_pdf = sum(1 for p in paginas if p.erro is None and not p.tem_pdf)

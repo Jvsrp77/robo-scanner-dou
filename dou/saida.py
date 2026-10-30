@@ -16,7 +16,8 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 
-COLUNAS = ["Data", "Página", "Empresa", "CNPJ", "Atividades", "Status", "Link"]
+COLUNAS = ["Data", "Página", "Empresa", "CNPJ", "Atividades", "Status",
+           "Resolução", "Processo", "Expediente", "Petição", "Link"]
 
 _AMARELO = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 

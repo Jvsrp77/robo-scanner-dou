@@ -27,6 +27,7 @@ class Config:
     threads: int = THREADS_PADRAO
     pausa: float = PAUSA_PADRAO
     saida: Path = Path(".")
+    todas: bool = False
     tempo_limite: int = 15
 
     @property
@@ -97,6 +98,11 @@ def da_linha_de_comando(argv: list[str] | None = None) -> Config:
     parser.add_argument(
         "--jornal", type=int, default=_env_int("DOU_JORNAL_ID", JORNAL_PADRAO),
     )
+    parser.add_argument(
+        "--todas", action="store_true",
+        help="nao filtrar: extrai todo CNPJ da Secao 1, e nao so as "
+             "autorizacoes sanitarias (AFE/AE)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -108,4 +114,5 @@ def da_linha_de_comando(argv: list[str] | None = None) -> Config:
         threads=args.threads,
         pausa=args.pausa,
         saida=args.saida,
+        todas=args.todas,
     )
