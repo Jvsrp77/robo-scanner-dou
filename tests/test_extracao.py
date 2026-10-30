@@ -17,8 +17,12 @@ def link(pagina: int) -> str:
     return f"https://exemplo/{pagina}"
 
 
-def extrair_texto(texto, pagina=1, aberto=None):
-    return extrair_da_pagina(texto, pagina, DATA, link(pagina), aberto)
+def extrair_texto(texto, pagina=1, aberto=None, anterior=""):
+    """Descarta a ultima linha devolvida: so os testes de costura precisam dela."""
+    fechados, aberto, _ = extrair_da_pagina(
+        texto, pagina, DATA, link(pagina), aberto, anterior
+    )
+    return fechados, aberto
 
 
 # --------------------------------------------------------------- reconhecimento
@@ -137,3 +141,72 @@ def test_paginas_fora_de_ordem_sao_reordenadas():
 def test_pagina_sem_pdf_nao_vira_registro():
     paginas = [PaginaBaixada(1, tem_pdf=False), PaginaBaixada(2, tem_pdf=False)]
     assert extrair(paginas, DATA, link) == []
+
+# ------------------------------------------------- formato atual do DOU
+# O CNPJ vem rotulado, em linha propria, e a razao social fica na anterior.
+# Trecho com a estrutura real da Secao 1.
+
+TRECHO_DOU = chr(10).join([
+    "AREA: 4 Artes Visuais (Artigo 18 , 1)",
+    "2512192 - Exposicao Treelogia - As Arvores e o Tempo",
+    "VENTO LESTE EDITORA E PUBLICACOES LTDA",
+    "CNPJ/CPF: 21.098.367/0001-60",
+    "Processo: 01400038883202547",
+    "Cidade: Sao Paulo - SP;",
+    "Valor Aprovado: R$ 344.668,50",
+])
+
+
+def test_reconhece_cnpj_rotulado_com_nome_na_linha_anterior():
+    _, aberto = extrair_texto(TRECHO_DOU)
+
+    assert aberto is not None
+    assert aberto.empresa == "VENTO LESTE EDITORA E PUBLICACOES LTDA"
+    assert aberto.cnpj == "21.098.367/0001-60"
+
+
+def test_campo_rotulado_nao_vira_razao_social():
+    texto = chr(10).join([
+        "Processo: 01400038883202547",
+        "CNPJ/CPF: 21.098.367/0001-60",
+    ])
+    fechados, aberto = extrair_texto(texto)
+
+    assert fechados == []
+    assert aberto is None
+
+
+def test_cnpj_rotulado_na_mesma_linha_que_o_nome():
+    texto = "titulada pela entidade PATRIMONIAL LR LTDA., CNPJ n 03.851.648/0001-60,"
+    _, aberto = extrair_texto(texto)
+
+    assert aberto is not None
+    assert aberto.cnpj == "03.851.648/0001-60"
+    assert "PATRIMONIAL LR LTDA" in aberto.empresa
+
+
+def test_nome_na_pagina_anterior_ao_cnpj():
+    # A razao social fecha a pagina 10; o CNPJ abre a 11.
+    pagina_10 = PaginaBaixada(10, texto="INSTITUTO CAVALCANTI HATHERLY")
+    pagina_11 = PaginaBaixada(11, texto="CNPJ/CPF: 52.819.309/0001-01")
+
+    registros = extrair([pagina_10, pagina_11], DATA, link)
+
+    assert len(registros) == 1
+    assert registros[0].empresa == "INSTITUTO CAVALCANTI HATHERLY"
+    assert registros[0].cnpj == "52.819.309/0001-01"
+
+
+def test_dois_proponentes_seguidos_viram_dois_registros():
+    texto = chr(10).join([
+        "VENTO LESTE EDITORA E PUBLICACOES LTDA",
+        "CNPJ/CPF: 21.098.367/0001-60",
+        "Valor Aprovado: R$ 344.668,50",
+        "AGENCIA DE DESENVOLVIMENTO E INOVACAO SOCIOCULTURAL - ADECULT",
+        "CNPJ/CPF: 30.017.987/0001-18",
+    ])
+    fechados, aberto = extrair_texto(texto)
+
+    assert len(fechados) == 1
+    assert fechados[0].cnpj == "21.098.367/0001-60"
+    assert aberto.cnpj == "30.017.987/0001-18"

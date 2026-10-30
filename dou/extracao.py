@@ -14,8 +14,23 @@ VERBOS_ATIVIDADE = (
     "COMÉRCIO", "FABRICAR", "IMPORTAR", "DISPENSAR",
 )
 
-# "RAZAO SOCIAL LTDA / 00.000.000/0001-00"
-RE_EMPRESA = re.compile(r"(.+?)\s*/\s*(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})")
+RE_CNPJ = r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}"
+
+# Formato 1 - nome e CNPJ na mesma linha, separados por barra:
+#   "RAZAO SOCIAL LTDA / 00.000.000/0001-00"
+RE_EMPRESA = re.compile(rf"(.+?)\s*/\s*({RE_CNPJ})")
+
+# Formato 2 - o do DOU atual: o CNPJ vem rotulado, numa linha propria, e a
+# razao social fica na linha imediatamente anterior:
+#   "VENTO LESTE EDITORA E PUBLICACOES LTDA"
+#   "CNPJ/CPF: 21.098.367/0001-60"
+RE_CNPJ_ROTULADO = re.compile(
+    rf"\bCNPJ(?:/CPF)?\b[^0-9]{{0,12}}({RE_CNPJ})", re.IGNORECASE
+)
+
+# Linhas que sao campo rotulado ("Processo:", "Cidade:", "Valor Aprovado:")
+# nunca sao razao social.
+RE_CAMPO_ROTULADO = re.compile(r"^[A-Za-zÀ-ÿ /]{3,30}:\s")
 
 # Numeracao do item no inicio da linha ("12.3 - ", "4. ", etc.)
 RE_PREFIXO_ITEM = re.compile(r"^[\d\.\-\s]+")
@@ -65,50 +80,75 @@ def _limpar_nome(bruto: str) -> str:
     return RE_PREFIXO_ITEM.sub("", bruto.strip()).strip()
 
 
+def _serve_como_nome(linha: str) -> bool:
+    """A linha anterior ao CNPJ rotulado e a razao social — quando parece uma."""
+    limpa = _limpar_nome(linha)
+    if len(limpa) <= 4:
+        return False
+    if RE_CAMPO_ROTULADO.match(limpa):
+        return False
+    if re.search(RE_CNPJ, limpa):
+        return False
+    return True
+
+
 def extrair_da_pagina(
     texto: str,
     pagina: int,
     data: str,
     link: str,
     aberto: Registro | None = None,
-) -> tuple[list[Registro], Registro | None]:
+    linha_anterior: str = "",
+) -> tuple[list[Registro], Registro | None, str]:
     """Le uma pagina.
 
     `aberto` e o registro que ficou pela metade no fim da pagina anterior: suas
     atividades continuam sendo acumuladas aqui ate aparecer o proximo CNPJ.
-    Devolve os registros fechados e o que sobrou em aberto.
+    `linha_anterior` e a ultima linha util da pagina anterior, necessaria
+    quando o CNPJ rotulado cai na primeira linha desta.
+
+    Devolve os registros fechados, o que sobrou em aberto e a ultima linha.
     """
     fechados: list[Registro] = []
     atual = aberto
+    anterior = linha_anterior
 
     if atual is not None and atual.pagina != pagina:
         atual.paginas_extras.append(pagina)
 
-    for linha in texto.split("\n"):
+    def abrir(nome: str, cnpj: str) -> Registro | None:
+        nonlocal atual
+        nome = _limpar_nome(nome)
+        if len(nome) <= 4:
+            return None
+        if atual is not None:
+            fechados.append(atual)
+        atual = Registro(data=data, pagina=pagina, empresa=nome, cnpj=cnpj, link=link)
+        return atual
+
+    for linha in texto.splitlines():
         linha = linha.strip()
         if not linha:
             continue
 
+        # Formato 2 primeiro: e o do DOU atual, e a linha "CNPJ/CPF: X"
+        # tambem casaria com o formato 1 por causa da barra do CNPJ.
+        rotulado = RE_CNPJ_ROTULADO.search(linha)
+        if rotulado:
+            antes_do_rotulo = linha[: rotulado.start()].strip(" -–—:")
+            nome = antes_do_rotulo if _serve_como_nome(antes_do_rotulo) else anterior
+            if _serve_como_nome(nome):
+                abrir(nome, rotulado.group(1))
+            anterior = linha
+            continue
+
         casamento = RE_EMPRESA.search(linha)
         if casamento:
-            nome = _limpar_nome(casamento.group(1))
-
-            # Linha com CNPJ mas sem nome utilizavel nao abre registro;
-            # tambem nao deve engolir o registro anterior.
-            if len(nome) <= 4:
-                continue
-
-            if atual is not None:
-                fechados.append(atual)
-
-            atual = Registro(
-                data=data,
-                pagina=pagina,
-                empresa=nome,
-                cnpj=casamento.group(2),
-                link=link,
-            )
+            abrir(casamento.group(1), casamento.group(2))
+            anterior = linha
             continue
+
+        anterior = linha
 
         if atual is None:
             continue
@@ -119,7 +159,7 @@ def extrair_da_pagina(
 
         atual.status = classificar(linha, atual.status)
 
-    return fechados, atual
+    return fechados, atual, anterior
 
 
 def extrair(paginas, data: str, link_de) -> list[Registro]:
@@ -131,6 +171,7 @@ def extrair(paginas, data: str, link_de) -> list[Registro]:
     registros: list[Registro] = []
     aberto: Registro | None = None
     anterior: int | None = None
+    ultima_linha = ""
 
     for pag in sorted(paginas, key=lambda p: p.pagina):
         # Buraco na sequencia (pagina que falhou ou nao existe): o registro
@@ -144,10 +185,11 @@ def extrair(paginas, data: str, link_de) -> list[Registro]:
                 registros.append(aberto)
                 aberto = None
             anterior = None
+            ultima_linha = ""
             continue
 
-        fechados, aberto = extrair_da_pagina(
-            pag.texto, pag.pagina, data, link_de(pag.pagina), aberto
+        fechados, aberto, ultima_linha = extrair_da_pagina(
+            pag.texto, pag.pagina, data, link_de(pag.pagina), aberto, ultima_linha
         )
         registros.extend(fechados)
         anterior = pag.pagina

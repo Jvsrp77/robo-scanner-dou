@@ -16,18 +16,36 @@ As páginas são baixadas por **50 threads simultâneas**, cobrindo por padrão 
 
 ## Como funciona
 
-O gargalo aqui é rede, não CPU: cada página é um download independente que passa a maior parte do tempo esperando resposta do servidor. Por isso o paralelismo é por *threads*, e não por processos.
+O gargalo é rede, não CPU: cada página é um download independente que passa a
+maior parte do tempo esperando resposta. Por isso o paralelismo é por *threads*.
 
 | Decisão | Por quê |
 |---|---|
-| **PyMuPDF** (`fitz`) em vez de `pdfplumber` | Extração de texto consideravelmente mais rápida, e aceita o PDF como *stream* de bytes |
-| **Leitura em memória** (`fitz.open(stream=...)`) | Sem arquivo temporário: nada a limpar depois, e 400 PDFs não encostam no disco |
-| **Sessão HTTP persistente** com pool dimensionado para as 50 threads | Evita refazer handshake TLS a cada página |
-| **Retry automático** (3 tentativas, *backoff* 0,1) em erros 500, 502, 503 e 504 | O servidor do DOU falha de forma intermitente sob carga |
-| **`ThreadPoolExecutor` + `as_completed`** | Processa cada resultado assim que chega, em vez de esperar o lote inteiro |
-| **Ordenação por página no fim** | `as_completed` devolve fora de ordem; o relatório precisa sair na ordem do jornal |
+| **PyMuPDF** em vez de `pdfplumber` | Extração de texto mais rápida, e aceita o PDF como *stream* de bytes |
+| **Leitura em memória** | Sem arquivo temporário: nada a limpar depois, e 400 PDFs não encostam no disco |
+| **Sessão HTTP persistente** com retry (3 tentativas) em 500, 502, 503 e 504 | O servidor do DOU falha de forma intermitente sob carga |
+| **6 threads com pausa de 0,2 s** | Rodando agendado todo dia, cinquenta conexões simultâneas contra um servidor público seriam padrão de abuso |
+| **Extração separada do download** | A leitura do texto é função pura: testável com trechos salvos, sem depender do DOU estar no ar |
 
-A extração usa um analisador de linhas com estado: quando uma linha casa com o padrão de CNPJ, abre-se um registro novo; as linhas seguintes são acumuladas como atividade ou situação até que o próximo CNPJ apareça. É simples de propósito — o texto do DOU não tem estrutura para justificar um analisador mais pesado.
+### Os dois formatos de registro
+
+O analisador reconhece as duas formas em que a Seção 1 apresenta empresa e CNPJ:
+
+```
+RAZÃO SOCIAL LTDA / 00.000.000/0001-00        ← mesma linha, separados por barra
+
+VENTO LESTE EDITORA E PUBLICACOES LTDA        ← razão social
+CNPJ/CPF: 21.098.367/0001-60                  ← CNPJ rotulado, linha seguinte
+```
+
+O segundo é o que aparece nas edições atuais. Linhas que são campo rotulado
+(`Processo:`, `Cidade:`, `Valor Aprovado:`) nunca são tomadas por razão social.
+
+A análise percorre as páginas **na ordem do jornal**, carregando o registro em
+aberto de uma para a outra: empresa cujo bloco começa no fim de uma página e
+termina na seguinte deixa de sair incompleta. Se houver buraco na sequência —
+página que falhou ou não existe — o registro é fechado como está, porque o
+trecho perdido não pode ser inventado.
 
 ## Stack
 
@@ -96,7 +114,7 @@ em silêncio é pior que pipeline que quebra.
 pytest
 ```
 
-15 testes, nenhum acessa a rede. Cobrem o reconhecimento de empresa e CNPJ, o
+20 testes, nenhum acessa a rede. Cobrem o reconhecimento de empresa e CNPJ, o
 acúmulo de atividades, a classificação de situação (incluindo o caso em que
 `INDEFERIDO` contém `DEFERIDO`), a costura de registro partido entre páginas e
 a gravação do Excel — entre eles um que simula falha de escrita e confere que o
@@ -118,12 +136,10 @@ relatório anterior **não** foi destruído.
 
 Registradas por transparência:
 
-- **O padrão de reconhecimento não casa com o DOU atual.** A expressão regular
-  espera `RAZÃO SOCIAL / 00.000.000/0000-00` na mesma linha. Varrendo as edições
-  de 08/12/2025, 27/10/2026 e 29/10/2026, encontrei **861, 184 e 335 linhas com
-  CNPJ e nenhuma nesse formato** — o texto atual traz `CNPJ/CPF: 00.000.000/0001-00`
-  numa linha própria, com a razão social na linha anterior. Enquanto isso não for
-  tratado, a extração devolve zero registros nessas edições.
+- **Razão social quebrada em duas linhas sai cortada.** Quando o PDF quebra o
+  nome no meio, só o trecho vizinho ao CNPJ é capturado — aparecem registros
+  como `INSTITUTO E` ou `AURORA REC`. Numa amostra de 234 registros, cerca de
+  uma dúzia saiu assim.
 - **A classificação de situação é por palavra-chave.** `DEFERIDO`, `CONCESSÃO`,
   `AUTORIZA` e `INDEFERIDO` são procurados na linha crua. Redação fora do padrão
   pode ser classificada errado.
